@@ -18,7 +18,14 @@ try {
 
 const slideSrc = (slide: number) =>
 	`${DECK_BASE}?start=false&loop=false&rm=minimal&slide=${slide}`;
+
 const navigable = slideCount > 1;
+const slides = Array.from({ length: Math.max(slideCount, 1) }, (_, i) => i + 1);
+
+// Klone der letzten und ersten Folie an den Enden machen den Umlauf nahtlos:
+// Slot N zeigt dasselbe wie Slot 0, deshalb ist ein Sprung um N Slots unsichtbar.
+const track = navigable ? [slideCount, ...slides, 1] : slides;
+const firstSlot = navigable ? -1 : 0;
 ---
 
 <Layout title="Sophie Matthes" description="Portfolio of Sophie Matthes.">
@@ -29,14 +36,23 @@ const navigable = slideCount > 1;
 		data-delay={AUTOPLAY_DELAY}
 	>
 		<div class="deck">
-			<div class="pane" data-slide="1">
-				<iframe
-					src={slideSrc(1)}
-					title="Sophie Matthes — Portfolio"
-					allowfullscreen></iframe>
-			</div>
-			<div class="pane pane--offstage">
-				<iframe title="" aria-hidden="true"></iframe>
+			<div class="track">
+				{
+					track.map((slide, position) => {
+						const slot = firstSlot + position;
+						const primary = slot === 0;
+						return (
+							<div class="pane" data-slot={slot} style={`--slot: ${slot}`}>
+								<iframe
+									src={slideSrc(slide)}
+									title={primary ? "Sophie Matthes — Portfolio" : ""}
+									aria-hidden={primary ? undefined : "true"}
+									allowfullscreen
+								/>
+							</div>
+						);
+					})
+				}
 			</div>
 		</div>
 
@@ -84,16 +100,20 @@ const navigable = slideCount > 1;
 		aspect-ratio: 16 / 9;
 	}
 
-	.pane {
+	.track {
 		position: absolute;
 		inset: 0;
-		background: var(--color-bg);
+		transform: translateX(calc(var(--index, 0) * -100%));
 		transition: transform 500ms cubic-bezier(0.4, 0, 0.2, 1);
 		will-change: transform;
 	}
 
-	.pane--offstage {
-		transform: translateX(calc(100% + 1px));
+	.pane {
+		position: absolute;
+		inset-block: 0;
+		width: 100%;
+		transform: translateX(calc(var(--slot) * 100%));
+		background: var(--color-bg);
 	}
 
 	.pane iframe {
@@ -176,7 +196,7 @@ const navigable = slideCount > 1;
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.pane,
+		.track,
 		.nav {
 			transition: none;
 		}
@@ -184,112 +204,90 @@ const navigable = slideCount > 1;
 </style>
 
 <script>
-	const TRANSITION_MS = 500;
-
 	const stage = document.querySelector<HTMLElement>(".stage");
-	const panes = [...(stage?.querySelectorAll<HTMLElement>(".pane") ?? [])];
+	const deck = stage?.querySelector<HTMLElement>(".deck");
+	const track = deck?.querySelector<HTMLElement>(".track");
 
-	if (stage && panes.length === 2) {
+	if (stage && deck && track) {
 		const base = stage.dataset.deck;
 		const delay = Number(stage.dataset.delay);
 		const slideSrc = (slide: number) =>
 			`${base}?start=false&loop=false&rm=minimal&slide=${slide}`;
 
 		let count = Number(stage.dataset.count);
-		let active = 0;
-		let current = 1;
-		let busy = false;
+		let index = 0;
 		let handedOver = false;
 		let timer = 0;
 
-		const wrap = (slide: number) => ((slide - 1 + count) % count) + 1;
-
-		const flush = (direction: number) => `translateX(${direction > 0 ? 100 : -100}%)`;
-
-		const parked = (direction: number) =>
-			`translateX(calc(${direction > 0 ? "100% + 1px" : "-100% - 1px"}))`;
-
-		const snap = (pane: HTMLElement, transform: string) => {
-			pane.style.transition = "none";
-			pane.style.transform = transform;
-			void pane.offsetWidth;
-			pane.style.transition = "";
-		};
-
-		const loading = new WeakMap<HTMLElement, Promise<void>>();
-
-		const load = (pane: HTMLElement, slide: number) => {
-			if (pane.dataset.slide === String(slide)) {
-				return loading.get(pane) ?? Promise.resolve();
+		const place = (value: number, animate: boolean) => {
+			if (!animate) track.style.transition = "none";
+			track.style.setProperty("--index", String(value));
+			if (!animate) {
+				void track.offsetWidth;
+				track.style.transition = "";
 			}
-			pane.dataset.slide = String(slide);
-			const frame = pane.querySelector("iframe")!;
-			const done = new Promise<void>((resolve) => {
-				frame.addEventListener("load", () => resolve(), { once: true });
-				frame.src = slideSrc(slide);
-			});
-			loading.set(pane, done);
-			void done.then(() => {
-				if (loading.get(pane) === done) loading.delete(pane);
-			});
-			return done;
 		};
 
-		const settled = (pane: HTMLElement) =>
-			new Promise<void>((resolve) => {
-				const done = () => {
-					pane.removeEventListener("transitionend", done);
-					clearTimeout(fallback);
-					resolve();
-				};
-				const fallback = setTimeout(done, TRANSITION_MS + 100);
-				pane.addEventListener("transitionend", done);
-			});
-
-		const go = async (step: number, byUser = false) => {
+		const go = (step: number, byUser = false) => {
 			if (byUser) handedOver = true;
-			if (busy || count < 2) return;
-			busy = true;
+			if (count < 2) return;
+
+			// Zurück in den Bereich [0, count-1] springen. Das passiert nur auf einem
+			// Klon, wo der Sprung um count Slots dasselbe Bild zeigt – also unsichtbar.
+			if (index >= count) {
+				index -= count;
+				place(index, false);
+			} else if (index < 0) {
+				index += count;
+				place(index, false);
+			}
+
+			index += step;
+			place(index, true);
 			stopAutoplay();
-
-			const target = wrap(current + step);
-			const incoming = panes[1 - active];
-			const outgoing = panes[active];
-			await load(incoming, target);
-
-			snap(incoming, flush(step));
-
-			outgoing.style.transform = flush(-step);
-			incoming.style.transform = "translateX(0)";
-			await settled(incoming);
-
-			snap(outgoing, parked(-step));
-
-			active = 1 - active;
-			current = target;
-			busy = false;
-
-			void load(panes[1 - active], wrap(current + 1));
 			startAutoplay();
 		};
 
 		function startAutoplay() {
 			stopAutoplay();
 			if (handedOver || count < 2) return;
-			timer = window.setInterval(() => void go(1), delay);
+			timer = window.setInterval(() => go(1), delay);
 		}
 
 		function stopAutoplay() {
 			window.clearInterval(timer);
 		}
 
+		const rebuild = (live: number) => {
+			const slides = Array.from({ length: live }, (_, i) => i + 1);
+			const order = live > 1 ? [live, ...slides, 1] : slides;
+			const firstSlot = live > 1 ? -1 : 0;
+
+			track.replaceChildren(
+				...order.map((slide, position) => {
+					const slot = firstSlot + position;
+					const pane = document.createElement("div");
+					pane.className = "pane";
+					pane.dataset.slot = String(slot);
+					pane.style.setProperty("--slot", String(slot));
+					const frame = document.createElement("iframe");
+					frame.src = slideSrc(slide);
+					frame.allowFullscreen = true;
+					if (slot !== 0) frame.setAttribute("aria-hidden", "true");
+					pane.append(frame);
+					return pane;
+				}),
+			);
+		};
+
 		const applyCount = (live: number) => {
-			if (!Number.isInteger(live) || live === count) return;
+			if (!Number.isInteger(live) || live < 1 || live === count) return;
 			count = live;
+			index = 0;
 			stage.dataset.count = String(live);
 			stage.classList.toggle("is-navigable", live > 1);
-			if (current > live) current = 1;
-			void load(panes[1 - active], wrap(current + 1));
+			rebuild(live);
+			place(0, false);
 			startAutoplay();
 		};
 
@@ -298,7 +296,6 @@ const navigable = slideCount > 1;
 			.then((data) => data && applyCount(data.slideCount))
 			.catch(() => {});
 
-		if (count > 1) void load(panes[1], wrap(current + 1));
 		startAutoplay();
 
 		stage.addEventListener("pointerenter", stopAutoplay);
@@ -308,16 +305,14 @@ const navigable = slideCount > 1;
 		);
 
 		for (const button of stage.querySelectorAll<HTMLElement>(".nav")) {
-			button.addEventListener(
-				"click",
-				() => void go(Number(button.dataset.step), true),
+			button.addEventListener("click", () =>
+				go(Number(button.dataset.step), true),
 			);
 		}
 
 		document.addEventListener("keydown", (event) => {
-			if (event.key === "ArrowLeft") void go(-1, true);
-			else if (event.key === "ArrowRight") void go(1, true);
+			if (event.key === "ArrowLeft") go(-1, true);
+			else if (event.key === "ArrowRight") go(1, true);
 		});
-
 	}
 </script>
