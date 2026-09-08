@@ -22,10 +22,13 @@ const slideSrc = (slide: number) =>
 const navigable = slideCount > 1;
 const slides = Array.from({ length: Math.max(slideCount, 1) }, (_, i) => i + 1);
 
-// Klone der letzten und ersten Folie an den Enden machen den Umlauf nahtlos:
-// Slot N zeigt dasselbe wie Slot 0, deshalb ist ein Sprung um N Slots unsichtbar.
-const track = navigable ? [slideCount, ...slides, 1] : slides;
-const firstSlot = navigable ? -1 : 0;
+// Jede Folie sitzt auf der Kopie, die der aktuellen Position am nächsten liegt.
+// Dadurch ist jeder Slot rund um die Position belegt und nichts muss je
+// zurückgesetzt werden – auch nicht mitten in einer laufenden Bewegung.
+const slotFor = (slideIndex: number, position = 0) =>
+	navigable
+		? slideIndex + slideCount * Math.round((position - slideIndex) / slideCount)
+		: slideIndex;
 ---
 
 <Layout title="Sophie Matthes" description="Portfolio of Sophie Matthes.">
@@ -38,15 +41,14 @@ const firstSlot = navigable ? -1 : 0;
 		<div class="deck">
 			<div class="track">
 				{
-					track.map((slide, position) => {
-						const slot = firstSlot + position;
-						const primary = slot === 0;
+					slides.map((slide, slideIndex) => {
+						const slot = slotFor(slideIndex);
 						return (
-							<div class="pane" data-slot={slot} style={`--slot: ${slot}`}>
+							<div class="pane" data-slide={slideIndex} style={`--slot: ${slot}`}>
 								<iframe
 									src={slideSrc(slide)}
-									title={primary ? "Sophie Matthes — Portfolio" : ""}
-									aria-hidden={primary ? undefined : "true"}
+									title={slideIndex === 0 ? "Sophie Matthes — Portfolio" : ""}
+									aria-hidden={slideIndex === 0 ? undefined : "true"}
 									allowfullscreen
 								/>
 							</div>
@@ -218,32 +220,44 @@ const firstSlot = navigable ? -1 : 0;
 		let index = 0;
 		let handedOver = false;
 		let timer = 0;
+		let following = 0;
 
-		const place = (value: number, animate: boolean) => {
-			if (!animate) track.style.transition = "none";
-			track.style.setProperty("--index", String(value));
-			if (!animate) {
-				void track.offsetWidth;
-				track.style.transition = "";
+		const position = () => {
+			const width = deck.getBoundingClientRect().width;
+			if (!width) return index;
+			return -new DOMMatrixReadOnly(getComputedStyle(track).transform).m41 / width;
+		};
+
+		// Setzt jede Folie auf die Kopie, die der sichtbaren Position am nächsten
+		// liegt. Verschoben wird eine Folie erst, wenn sie mehr als eine halbe Runde
+		// entfernt ist – also weit außerhalb des Sichtfensters.
+		const layout = (at: number) => {
+			for (const pane of track.querySelectorAll<HTMLElement>(".pane")) {
+				const slide = Number(pane.dataset.slide);
+				const slot = slide + count * Math.round((at - slide) / count);
+				if (pane.dataset.slot !== String(slot)) {
+					pane.dataset.slot = String(slot);
+					pane.style.setProperty("--slot", String(slot));
+				}
 			}
+		};
+
+		const follow = () => {
+			const at = position();
+			layout(at);
+			following =
+				Math.abs(at - index) > 0.001 ? requestAnimationFrame(follow) : 0;
 		};
 
 		const go = (step: number, byUser = false) => {
 			if (byUser) handedOver = true;
 			if (count < 2) return;
 
-			// Zurück in den Bereich [0, count-1] springen. Das passiert nur auf einem
-			// Klon, wo der Sprung um count Slots dasselbe Bild zeigt – also unsichtbar.
-			if (index >= count) {
-				index -= count;
-				place(index, false);
-			} else if (index < 0) {
-				index += count;
-				place(index, false);
-			}
-
 			index += step;
-			place(index, true);
+			layout(position());
+			track.style.setProperty("--index", String(index));
+			if (!following) following = requestAnimationFrame(follow);
+
 			stopAutoplay();
 			startAutoplay();
 		};
@@ -259,21 +273,15 @@ const firstSlot = navigable ? -1 : 0;
 		}
 
 		const rebuild = (live: number) => {
-			const slides = Array.from({ length: live }, (_, i) => i + 1);
-			const order = live > 1 ? [live, ...slides, 1] : slides;
-			const firstSlot = live > 1 ? -1 : 0;
-
 			track.replaceChildren(
-				...order.map((slide, position) => {
-					const slot = firstSlot + position;
+				...Array.from({ length: live }, (_, slide) => {
 					const pane = document.createElement("div");
 					pane.className = "pane";
-					pane.dataset.slot = String(slot);
-					pane.style.setProperty("--slot", String(slot));
+					pane.dataset.slide = String(slide);
 					const frame = document.createElement("iframe");
-					frame.src = slideSrc(slide);
+					frame.src = slideSrc(slide + 1);
 					frame.allowFullscreen = true;
-					if (slot !== 0) frame.setAttribute("aria-hidden", "true");
+					if (slide !== 0) frame.setAttribute("aria-hidden", "true");
 					pane.append(frame);
 					return pane;
 				}),
@@ -286,8 +294,14 @@ const firstSlot = navigable ? -1 : 0;
 			index = 0;
 			stage.dataset.count = String(live);
 			stage.classList.toggle("is-navigable", live > 1);
+
 			rebuild(live);
-			place(0, false);
+			track.style.transition = "none";
+			track.style.setProperty("--index", "0");
+			layout(0);
+			void track.offsetWidth;
+			track.style.transition = "";
+
 			startAutoplay();
 		};
 
